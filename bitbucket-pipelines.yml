@@ -1,0 +1,126 @@
+# Doc: https://confluence.atlassian.com/bitbucket/configure-bitbucket-pipelines-yml-792298910.html
+image: jfgarcia268/sfdx_vlocity_java:v9.0
+pipelines:
+  custom:
+    CreatePackageVersion:
+      - variables:          
+          - name: RUN_APEX_TESTS
+          - name: SKIP_VALIDATION
+      - step:
+          name: Create Package Version
+          script:
+            # Login
+            - echo ${SFDX_URL_DEVHUB}
+            - echo ${SFDX_URL_DEVHUB} > env.sfdx
+            - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL_DEVHUB} -f env.sfdx
+            - rm -rf env.sfdx
+            # Create the Command Dinamicaly 
+            - COMMAND="sfdx force:package:version:create -p ${PACKAGE_NAME} -d ${SOURCE_FOLDER} -k ${KEY} --wait ${WAIT} -v ${SFDX_URL_DEVHUB}"      
+            - if [ $RUN_APEX_TESTS == 'true' ]; then
+            -    echo "Adding Code Coverage" 
+            -    COMMAND="${COMMAND} --codecoverage " 
+            - fi
+            - if [ $SKIP_VALIDATION == 'true' ]; then
+            -     echo "Adding Skip Validation" 
+            -    COMMAND="${COMMAND} --skipvalidation " 
+            - fi
+            # Run sfdx force:package:version:create 
+            - echo "COMMAND:${COMMAND}"
+            - ${COMMAND}
+    Deploy:
+      - variables:          
+          - name: SFDX_URL
+      - step:
+          name: Install Latest Package Version and SF Setup
+          script:
+            # Login
+            - echo ${SFDX_URL_DEVHUB} > env.sfdx
+            - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL_DEVHUB} -f env.sfdx
+            - echo "${!SFDX_URL}" > env2.sfdx
+            - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL} -f env2.sfdx
+            # Get latest Package Version from DevHub and create file "PID.txt" with it
+            - if [ -f rm PID.txt  ]; then
+            -   rm rm PID.txt  
+            - fi
+            - ./Get_Latest_Version_Package.sh ${SFDX_URL_DEVHUB}
+            # Installs Package based on "PID.txt"
+            - PACKAGE_ID=$(cat PID.txt)
+            - echo "PACKAGE_ID:${PACKAGE_ID}"
+            - sfdx force:package:install --package ${PACKAGE_ID} --targetusername=${SFDX_URL} --wait 1000 --publishwait 1000 --securitytype=AdminsOnly -k test1234
+            # SF Setup (Project Specific - Optional)
+            - sfdx force:data:tree:import --targetusername "${SFDX_URL}" --plan sfdx-data/Account-plan.json || true
+            - sfdx force:user:permset:assign --targetusername "${SFDX_URL}" --permsetname HandsetBuy || true
+      - step:
+          name: Vlocity Deploy and PostJobs
+          script:
+            # Login
+            - echo "${!SFDX_URL}" > env2.sfdx
+            - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL} -f env2.sfdx
+            # Deploy Vlocity
+            - vlocity -sfdx.username "${SFDX_URL}" -job Deploy_Delta.yaml packDeploy --verbose true --simpleLogging true
+            # Deploy PostJobs
+            - vlocity -sfdx.username "${SFDX_URL}" --nojob runApex -apex apex/RunProductBatchJobs.cls --verbose true --simpleLogging true
+    DeployProd:
+      - step:
+          name: Install Latest Package Version and SF Setup
+          script:
+            # Login
+            - echo ${SFDX_URL_DEVHUB} > env.sfdx
+            - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL_DEVHUB} -f env.sfdx
+            # Get latest Package Version from DevHub and create file "PID.txt" with it
+            - if [ -f rm PID.txt  ]; then
+            -   rm rm PID.txt  
+            - fi
+            - ./Get_Latest_Version_Package.sh ${SFDX_URL_DEVHUB}
+            # Promotes Package based on "PID.txt"
+            - PACKAGE_ID=$(cat PID.txt)
+            - echo "PACKAGE_ID:${PACKAGE_ID}"
+            - sfdx force:package:version:promote --noprompt --package ${PACKAGE_ID} --targetdevhubusername ${SFDX_URL_DEVHUB}
+            # Installs Package based on "PID.txt"
+            - sfdx force:package:install --package ${PACKAGE_ID} --targetusername=${SFDX_URL_DEVHUB} --wait 1000 --publishwait 1000 --securitytype=AdminsOnly -k test1234
+            # SF Setup (Project Specific - Optional)
+            - sfdx force:user:permset:assign --targetusername "${SFDX_URL_DEVHUB}" --permsetname HandsetBuy || true
+      - step:
+          name: Vlocity Deploy and PostJobs
+          script:
+            # Login
+            - echo "${SFDX_URL_DEVHUB}" > env.sfdx
+            - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL_DEVHUB} -f env.sfdx
+            # Deploy Vlocity
+            - vlocity -sfdx.username "${SFDX_URL_DEVHUB}" -job Deploy_Delta.yaml packDeploy --verbose true --simpleLogging true
+            # Deploy PostJobs
+            - vlocity -sfdx.username "${SFDX_URL_DEVHUB}" --nojob runApex -apex apex/RunProductBatchJobs.cls --verbose true --simpleLogging true
+    CreateScratchOrg:
+      - step:
+          name: Create Scratch Org
+          script:
+          # DevHub Login
+          - echo ${SFDX_URL_DEVHUB} > env.sfdx
+          - sfdx force:auth:sfdxurl:store -d -a ${SFDX_URL_DEVHUB} -f env.sfdx
+          # Create SO
+          - sfdx force:org:create --definitionfile config/project-scratch-def.json -a ALIAS --durationdays 29 --targetdevhubusername ${SFDX_URL_DEVHUB}
+          # Generate Password and file with info
+          - sfdx force:user:password:generate -u ALIAS --targetdevhubusername ${SFDX_URL_DEVHUB}
+          - ORG_INFO=$(sfdx force:org:display -u ALIAS --verbose) 
+          - echo "$ORG_INFO"
+          # Install Manage Package
+          - PACKAGE_ID=$(jq -r '.packageAliases."Vlocity CMT"' sfdx-project.json)
+          - sfdx force:package:install -p ${PACKAGE_ID} --targetusername ALIAS -w 1000 --noprompt
+          # TESTING 
+          #- echo xxx > env2.sfdx
+          #- sfdx force:auth:sfdxurl:store -d -a ALIAS -f env2.sfdx
+          # SF Setup 
+          - sfdx force:source:deploy --sourcepath force-app --targetusername ALIAS --verbose
+          - sfdx force:data:tree:import --targetusername ALIAS --plan sfdx-data/Account-plan.json
+          - sfdx force:user:permset:assign --targetusername ALIAS --permsetname HandsetBuy
+          # Vlocity Setup 
+          - vlocity -sfdx.username ALIAS --nojob packUpdateSettings --simpleLogging true
+          - vlocity -sfdx.username ALIAS --nojob installVlocityInitial --verbose
+          - vlocity -sfdx.username ALIAS --nojob runApex -apex apex/cmt_InitializeOrg.cls --simpleLogging true
+          # Vlocity Deploy
+          - vlocity -sfdx.username ALIAS -job Deploy_Delta.yaml packDeploy --verbose true --simpleLogging true
+          - vlocity -sfdx.username ALIAS --nojob runApex -apex apex/RunProductBatchJobs.cls --simpleLogging true
+ 
+
+
+
