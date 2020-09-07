@@ -1,5 +1,5 @@
 # Doc: https://confluence.atlassian.com/bitbucket/configure-bitbucket-pipelines-yml-792298910.html
-image: jfgarcia268/sfdx_vlocity_java:v9.0
+image: jfgarcia268/sfdx_vlocity_java:latest
 pipelines:
   custom:
     CreatePackageVersion:
